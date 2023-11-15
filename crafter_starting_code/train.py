@@ -1,25 +1,14 @@
 import argparse
 import pickle
 from pathlib import Path
+from collections import deque
 
 import torch
+import random
 
 from src.crafter_wrapper import Env
-
-
-class RandomAgent:
-    """An example Random Agent"""
-
-    def __init__(self, action_num) -> None:
-        self.action_num = action_num
-        # a uniformly random policy
-        self.policy = torch.distributions.Categorical(
-            torch.ones(action_num) / action_num
-        )
-
-    def act(self, observation):
-        """ Since this is a random agent the observation is not used."""
-        return self.policy.sample().item()
+from src.drl_agent import DRLAgent
+from src.icm import ICM
 
 
 def _save_stats(episodic_returns, crt_step, path):
@@ -70,27 +59,53 @@ def _info(opt):
 
 def main(opt):
     _info(opt)
-    #opt.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # opt.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     opt.device = torch.device("cpu")
     env = Env("train", opt)
     eval_env = Env("eval", opt)
-    agent = RandomAgent(env.action_space.n)
+    input_shape = env.observation_space.shape[0]  # Adjust as per your environment
+    num_actions = env.action_space.n
 
-    # main loop
-    ep_cnt, step_cnt, done = 0, 0, True
-    while step_cnt < opt.steps or not done:
-        if done:
-            ep_cnt += 1
-            obs, done = env.reset(), False
+    # Training parameters
+    num_episodes = 1000
+    max_steps_per_episode = 100
+    replay_buffer = deque(maxlen=50000)
+    batch_size = 64
+    epsilon_start = 1.0
+    epsilon_end = 0.01
+    epsilon_decay = 0.995
+    learning_rate = 1e-4
+    gamma = 0.99  # Discount factor for future rewards
 
-        action = agent.act(obs)
-        obs, reward, done, info = env.step(action)
+    # Agent and ICM setup
+    agent = DRLAgent(input_shape, num_actions, learning_rate=learning_rate, gamma=gamma)
+    icm = ICM(input_shape, num_actions, learning_rate=learning_rate)
 
-        step_cnt += 1
+    # Training loop
+    for episode in range(num_episodes):
+        state = env.reset()
+        total_reward = 0
+        epsilon = max(epsilon_end, epsilon_start * (epsilon_decay ** episode))
 
-        # evaluate once in a while
-        if step_cnt % opt.eval_interval == 0:
-            eval(agent, eval_env, step_cnt, opt)
+        for step in range(max_steps_per_episode):
+            action = agent.select_action(state, epsilon)
+            next_state, reward, done, _ = env.step(action)
+
+            # Store transition in the replay buffer
+            replay_buffer.append((state, action, reward, next_state, done))
+
+            # Update the agent if the replay buffer is sufficiently full
+            if len(replay_buffer) > batch_size:
+                batch = random.sample(replay_buffer, batch_size)
+                agent.update_policy(batch, icm)
+
+            state = next_state
+            total_reward += reward
+
+            if done:
+                break
+
+        print(f"Episode {episode}, Total Reward: {total_reward}")
 
 
 def get_options():
